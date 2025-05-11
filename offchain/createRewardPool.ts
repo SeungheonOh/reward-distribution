@@ -55,10 +55,10 @@ const tx =
     .pay.ToContract(alwaysFailAddress, undefined, undefined, poolScript)
     .pay.ToContract(poolAddress, {kind: "inline", value: L.Data.to([])}, {
       lovelace: 1_000_000_000n,
-      [poolNftSymbol+"01"]: 1n,
+      [poolNftSymbol+"02"]: 1n,
     }, undefined)
     .mintAssets({
-      [poolNftSymbol+"01"]: 1n,
+      [poolNftSymbol+"02"]: 1n,
     }, L.Data.to(new L.Constr(0, [])))
     .attach.MintingPolicy(poolScript)
     .complete()

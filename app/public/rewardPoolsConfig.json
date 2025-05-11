@@ -1,0 +1,47 @@
+{
+  "af0a028b5b34cfcc485bd417fd9b5b91239d97760a348cf18f1013ce": [
+    {
+      "index": 0,
+      "name": "Q1 Staking Rewards (Token Set 1)",
+      "description": "Rewards for tokens (from Policy ID 1) staked in Q1 2024.",
+      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P1_0#0",
+      "totalAmountInPool": 10000,
+      "status": "active"
+    },
+    {
+      "index": 0,
+      "name": "Bob",
+      "description": "Bob Bobbing",
+      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P1_1#0",
+      "totalAmountInPool": 5000,
+      "status": "active"
+    },
+    {
+      "index": 1,
+      "name": "foobar",
+      "description": "arstarst",
+      "poolScriptReference": "d90632854d66528b171ff9065e4642857df5bb59f4157742aab0edf5bc7682c1#0",
+      "totalAmountInPool": 1000,
+      "status": "active"
+    },
+    {
+      "index": 2,
+      "name": "Rob",
+      "description": "Rob Robbing",
+      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P1_1#0",
+      "totalAmountInPool": 5000,
+      "status": "active"
+    }
+  ],
+  "YOUR_EQUITY_TOKEN_POLICY_ID_2": [
+    {
+      "index": 0,
+      "name": "Liquidity Rewards (Token Set 2)",
+      "description": "Rewards for providing liquidity with tokens from Policy ID 2.",
+      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P2_0#0",
+      "totalAmountInPool": 12000,
+      "status": "pending"
+    }
+  ],
+  "ANOTHER_POLICY_ID_EXAMPLE_EMPTY": []
+} 

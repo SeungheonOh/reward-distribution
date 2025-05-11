@@ -36,7 +36,7 @@ const poolIdx = (Object.entries(poolUtxo.assets).find(([unit, _]) => unit.slice(
 console.log(poolUtxo)
 console.log(`0x${poolIdx}`)
 
-const withdrawAmount = 1000n
+const withdrawAmount = 2000n
 
 const tx =
   await lucid.newTx()
