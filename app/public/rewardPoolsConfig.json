@@ -1,22 +1,6 @@
 {
   "af0a028b5b34cfcc485bd417fd9b5b91239d97760a348cf18f1013ce": [
     {
-      "index": 0,
-      "name": "Q1 Staking Rewards (Token Set 1)",
-      "description": "Rewards for tokens (from Policy ID 1) staked in Q1 2024.",
-      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P1_0#0",
-      "totalAmountInPool": 10000,
-      "status": "active"
-    },
-    {
-      "index": 0,
-      "name": "Bob",
-      "description": "Bob Bobbing",
-      "poolScriptReference": "YOUR_POOL_VALIDATOR_TXHASH_P1_1#0",
-      "totalAmountInPool": 5000,
-      "status": "active"
-    },
-    {
       "index": 1,
       "name": "foobar",
       "description": "arstarst",

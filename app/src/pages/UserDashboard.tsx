@@ -66,6 +66,11 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   const [withdrawalTxHash, setWithdrawalTxHash] = useState<string | null>(null);
   const [withdrawalError, setWithdrawalError] = useState<string | null>(null);
 
+  // State for reloading data
+  const [isReloadingData, setIsReloadingData] = useState<boolean>(false);
+  const [reloadDataError, setReloadDataError] = useState<string | null>(null);
+  const [lastReloadTime, setLastReloadTime] = useState<Date | null>(null);
+
   useEffect(() => {
     async function fetchConfigs() {
       setIsLoadingConfigs(true);
@@ -149,6 +154,8 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   const handleSetReferenceScript = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setReferenceError(null);
+    setReloadDataError(null); // Clear reload error when setting new reference
+    setLastReloadTime(null); // Clear last reload time
     setIsLoadingReference(true);
     setUserEquityHoldings({});
     setPolicyId(null); 
@@ -209,12 +216,52 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
       console.log(`Policy ID loaded: ${calculatedPolicyId}`);
       setReferenceUtxo({ txHash, outputIndex });
       setIsReferenceScriptSet(true);
+      setLastReloadTime(new Date()); // Set initial load time as last reload time
     } catch (err) {
       console.error("Error fetching or processing reference UTXO:", err);
       setReferenceError(`Failed to load script: ${err instanceof Error ? err.message : String(err)}`);
       setPolicyId(null);
     } finally {
       setIsLoadingReference(false);
+    }
+  };
+
+  const handleReloadData = async () => {
+    if (!lucidInstance || !policyId) {
+      setReloadDataError("Cannot reload data: Lucid instance or Policy ID is not available.");
+      return;
+    }
+
+    setIsReloadingData(true);
+    setReloadDataError(null);
+
+    try {
+      const walletUtxos: LucidUTxO[] = await lucidInstance.wallet().getUtxos();
+      const holdings: AssetHoldings = walletUtxos
+        .map((utxo: LucidUTxO) => {
+          return Object.fromEntries(
+            Object.entries(utxo.assets).filter(([assetUnit, _quantity]: [string, bigint]) => {
+               return assetUnit.startsWith(policyId) 
+             }
+            )
+          ) as AssetHoldings;
+        })
+        .reduce((acc: AssetHoldings, currentHoldings: AssetHoldings) => {
+          for (const unit in currentHoldings) {
+            acc[unit] = (acc[unit] || 0n) + currentHoldings[unit];
+          }
+          return acc;
+        }, {} as AssetHoldings);
+      
+      setUserEquityHoldings(holdings);
+      console.log('User Equity Holdings reloaded:', holdings);
+      setLastReloadTime(new Date());
+    } catch (err) {
+      console.error("Error reloading user data:", err);
+      setReloadDataError(`Failed to reload data: ${err instanceof Error ? err.message : String(err)}`);
+      // Optionally, revert userEquityHoldings or handle partial updates if necessary
+    } finally {
+      setIsReloadingData(false);
     }
   };
 
@@ -253,6 +300,11 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
         setSelectedPool(null);
         return;
     }
+    if (!referenceUtxo) {
+        setWithdrawalError("Equity token reference script is not set. Please set it first.");
+        setSelectedPool(null);
+        return;
+    }
     const targetPool = displayablePools.find(p => String(p.index) === selectedPool);
     if (!targetPool || targetPool.userTokenAmount === null || typeof targetPool.qualifyingUserTokenIndex !== 'number') {
       console.error("Error in confirm: Target pool or qualifying token info is invalid.");
@@ -288,9 +340,13 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
             lucid: lucidInstance,
             targetPool: mapPoolToWithdrawalParams(targetPool),
             intermediatePools: [],
-            amount: currentWithdrawAmount
+            amount: currentWithdrawAmount,
+            equityNFTScriptORef: referenceUtxo
         } as ProcessWithdrawalArgs);
         setWithdrawalTxHash(txResult);
+        if (txResult) {
+          handleReloadData();
+        }
       } catch (error) {
         setWithdrawalError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -302,6 +358,12 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
 
   const handleConfirmCascadeWithdraw = async () => {
     if (withdrawCascadeDetails && lucidInstance) {
+      if (!referenceUtxo) {
+        setWithdrawalError("Equity token reference script is not set. Please set it first.");
+        setShowWithdrawCascadeModal(false);
+        setWithdrawCascadeDetails(null);
+        return;
+      }
       setIsProcessingWithdrawal(true);
       setWithdrawalTxHash(null);
       setWithdrawalError(null);
@@ -310,9 +372,13 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
             lucid: lucidInstance,
             targetPool: mapPoolToWithdrawalParams(withdrawCascadeDetails.targetPool),
             intermediatePools: withdrawCascadeDetails.intermediatePools.map(mapPoolToWithdrawalParams),
-            amount: withdrawCascadeDetails.amountForTargetPool
+            amount: withdrawCascadeDetails.amountForTargetPool,
+            equityNFTScriptORef: referenceUtxo
         } as ProcessWithdrawalArgs);
         setWithdrawalTxHash(txResult);
+        if (txResult) {
+          handleReloadData();
+        }
       } catch (error) {
         setWithdrawalError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -404,6 +470,43 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
             Policy ID: <span className="font-mono bg-gray-100 p-1 rounded">{policyId}</span>
           </p>
         )}
+        <div className="mt-3 flex items-center space-x-3">
+            <motion.button
+              onClick={handleReloadData}
+              disabled={!isReferenceScriptSet || isReloadingData || isLoadingReference}
+              whileHover={{ scale: !isReloadingData && !isLoadingReference ? 1.03 : 1 }}
+              whileTap={{ scale: !isReloadingData && !isLoadingReference ? 0.97 : 1 }}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-200 flex items-center justify-center space-x-1.5 ${(!isReferenceScriptSet || isReloadingData || isLoadingReference)
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-blue-500 text-white hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1'
+              }`}
+            >
+              {isReloadingData ? (
+                <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                </svg>
+              )}
+              <span>{isReloadingData ? 'Reloading...' : 'Reload Data'}</span>
+            </motion.button>
+            {lastReloadTime && !isReloadingData && (
+              <p className="text-xs text-gray-500">Last updated: {lastReloadTime.toLocaleTimeString()}</p>
+            )}
+        </div>
+        {reloadDataError && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-red-500 text-xs mt-2"
+            >
+              {reloadDataError}
+            </motion.p>
+        )}
+
         {Object.keys(userEquityHoldings).length > 0 && lucidInstance && (
           <div className="mt-4">
             <h3 className="text-md font-semibold text-gray-800 mb-2">Your Equity Token Holdings (All under this Policy ID):</h3>
