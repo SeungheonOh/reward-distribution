@@ -6,7 +6,6 @@ export interface WithdrawalPoolParams {
     name: string;
     index: number;
     userTokenUnit: string | null; // The specific equity token unit for this user for this pool
-    qualifyingUserTokenIndex: number | null; // The index of the user's token that qualifies
     userTokenAmount: bigint | null; // Amount of that specific equity token
     poolScriptReference: string; // Needed for interacting with the pool script
     // Add any other specific fields required for the transaction from DisplayableRewardPool
@@ -34,7 +33,6 @@ export async function processWithdrawal(
         console.log("Including intermediate pools:", intermediatePools.map(p => `${p.name} (Index: ${p.index})`));
     }
     console.log("User's qualifying token for this operation:", targetPool.userTokenUnit);
-    console.log("Index of this token before withdrawal:", targetPool.qualifyingUserTokenIndex);
     console.log("Amount of this token held:", targetPool.userTokenAmount);
     console.log("Amount from input for target pool (or cascade):", withdrawAmount);
 

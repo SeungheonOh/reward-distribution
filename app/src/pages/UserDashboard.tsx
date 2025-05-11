@@ -10,12 +10,12 @@ interface ReferenceUtxo {
 }
 
 interface UserDashboardProps {
-  lucidInstance: Lucid | null;
+  lucidInstance: any;
   appNetwork?: LucidNetwork | null;
 }
 
-interface AssetHoldings { 
-  [unit: string]: bigint; 
+interface AssetHoldingsByIndex {
+  [tokenIndex: number]: bigint; 
 }
 
 interface RewardPoolConfig {
@@ -31,10 +31,14 @@ interface RewardConfigsMap {
   [policyId: string]: RewardPoolConfig[];
 }
 
+interface QualifyingTokenInfo {
+  unit: string;
+  amount: bigint;
+  tokenIndex: number;
+}
+
 interface DisplayableRewardPool extends RewardPoolConfig {
-  userTokenAmount: bigint | null;
-  userTokenUnit: string | null;
-  qualifyingUserTokenIndex?: number | null;
+  qualifyingUserTokens: QualifyingTokenInfo[];
 }
 
 export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboardProps) {
@@ -47,7 +51,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   const [isLoadingReference, setIsLoadingReference] = useState<boolean>(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
   const [policyId, setPolicyId] = useState<string | null>(null);
-  const [userEquityHoldings, setUserEquityHoldings] = useState<AssetHoldings>({});
+  const [userEquityHoldingsByIndex, setUserEquityHoldingsByIndex] = useState<AssetHoldingsByIndex>({});
   
   const [rewardConfigsMap, setRewardConfigsMap] = useState<RewardConfigsMap | null>(null);
   const [isLoadingConfigs, setIsLoadingConfigs] = useState<boolean>(true);
@@ -65,6 +69,10 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   const [isProcessingWithdrawal, setIsProcessingWithdrawal] = useState<boolean>(false);
   const [withdrawalTxHash, setWithdrawalTxHash] = useState<string | null>(null);
   const [withdrawalError, setWithdrawalError] = useState<string | null>(null);
+
+  const [chosenTokenForWithdrawal, setChosenTokenForWithdrawal] = useState<QualifyingTokenInfo | null>(null);
+  const [showTokenSelectorModal, setShowTokenSelectorModal] = useState<boolean>(false);
+  const [poolForTokenSelection, setPoolForTokenSelection] = useState<DisplayableRewardPool | null>(null);
 
   // State for reloading data
   const [isReloadingData, setIsReloadingData] = useState<boolean>(false);
@@ -99,7 +107,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   };
 
   useEffect(() => {
-    if (!lucidInstance || !policyId || !rewardConfigsMap || Object.keys(userEquityHoldings).length === 0) {
+    if (!lucidInstance || !policyId || !rewardConfigsMap || !userEquityHoldingsByIndex) { 
       setDisplayablePools([]);
       return;
     }
@@ -111,40 +119,33 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
     }
 
     const newDisplayablePools = currentEquityPoolConfigs.map(config => {
-      let bestMatch = {
-        userTokenAmount: null as bigint | null,
-        userTokenUnit: null as string | null,
-        qualifyingUserTokenIndex: -1 as number
-      };
+      const qualifyingTokensForPool: QualifyingTokenInfo[] = [];
 
-      for (const [unit, amount] of Object.entries(userEquityHoldings)) {
-        if (unit.startsWith(policyId)) { 
-          const friendlyName = typeof lucidInstance.utils?.assetsToFriendlyName === 'function'
-            ? lucidInstance.utils.assetsToFriendlyName({ [unit]: amount })
-            : unit;
-          const userTokenIdx = getIndexFromFriendlyName(friendlyName);
-          
-          if (userTokenIdx !== null && userTokenIdx <= config.index) {
-            if (userTokenIdx > bestMatch.qualifyingUserTokenIndex) {
-              bestMatch = {
-                userTokenAmount: amount,
-                userTokenUnit: unit,
-                qualifyingUserTokenIndex: userTokenIdx
-              };
-            }
+      if (Object.keys(userEquityHoldingsByIndex).length > 0) {
+        for (const [indexStr, amount] of Object.entries(userEquityHoldingsByIndex)) {
+          const userTokenIdx = parseInt(indexStr, 10);
+          if (userTokenIdx <= config.index) { // Token qualifies if its index is <= pool index
+            const assetNameHex = userTokenIdx.toString(16).padStart(2, '0');
+            qualifyingTokensForPool.push({
+              unit: policyId + assetNameHex,
+              amount: amount,
+              tokenIndex: userTokenIdx
+            });
           }
         }
       }
+      
+      // Sort qualifying tokens by index, highest first (optional, but might be good for UI)
+      qualifyingTokensForPool.sort((a, b) => b.tokenIndex - a.tokenIndex);
+
       return {
          ...config,
-         userTokenAmount: bestMatch.userTokenAmount,
-         userTokenUnit: bestMatch.userTokenUnit,
-         qualifyingUserTokenIndex: bestMatch.qualifyingUserTokenIndex !== -1 ? bestMatch.qualifyingUserTokenIndex : null
+         qualifyingUserTokens: qualifyingTokensForPool
       };
     });
     setDisplayablePools(newDisplayablePools);
 
-  }, [lucidInstance, policyId, rewardConfigsMap, userEquityHoldings]);
+  }, [lucidInstance, policyId, rewardConfigsMap, userEquityHoldingsByIndex]);
 
   const handleReferenceInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     setReferenceScriptInput(e.target.value);
@@ -154,10 +155,10 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   const handleSetReferenceScript = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setReferenceError(null);
-    setReloadDataError(null); // Clear reload error when setting new reference
-    setLastReloadTime(null); // Clear last reload time
+    setReloadDataError(null);
+    setLastReloadTime(null);
     setIsLoadingReference(true);
-    setUserEquityHoldings({});
+    setUserEquityHoldingsByIndex({});
     setPolicyId(null); 
     setDisplayablePools([]);
 
@@ -194,33 +195,38 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
       setPolicyId(calculatedPolicyId);
 
       const walletUtxos: LucidUTxO[] = await lucidInstance.wallet().getUtxos();
-      const holdings: AssetHoldings = walletUtxos
-        .map((utxo: LucidUTxO) => {
-          return Object.fromEntries(
-            Object.entries(utxo.assets).filter(([assetUnit, _quantity]: [string, bigint]) => {
-               return assetUnit.startsWith(calculatedPolicyId) 
-             }
-            )
-          ) as AssetHoldings;
-        })
-        .reduce((acc: AssetHoldings, currentHoldings: AssetHoldings) => {
-          for (const unit in currentHoldings) {
-            acc[unit] = (acc[unit] || 0n) + currentHoldings[unit];
+      const newHoldingsByIndex: AssetHoldingsByIndex = {};
+
+      for (const utxo of walletUtxos) {
+        for (const assetUnit in utxo.assets) {
+          if (assetUnit.startsWith(calculatedPolicyId)) {
+            const amount = utxo.assets[assetUnit];
+            const friendlyName = typeof lucidInstance.utils?.assetsToFriendlyName === 'function'
+              ? lucidInstance.utils.assetsToFriendlyName({ [assetUnit]: amount })
+              : assetUnit;
+            const tokenIndex = getIndexFromFriendlyName(friendlyName);
+
+            if (tokenIndex !== null) {
+              newHoldingsByIndex[tokenIndex] = (newHoldingsByIndex[tokenIndex] || 0n) + amount;
+            }
           }
-          return acc;
-        }, {} as AssetHoldings);
+        }
+      }
       
-      setUserEquityHoldings(holdings);
-      console.log('User Equity Holdings for this policy:', holdings);
+      setUserEquityHoldingsByIndex(newHoldingsByIndex);
+      setPolicyId(calculatedPolicyId);
+
+      console.log('User Equity Holdings By Index:', newHoldingsByIndex);
       console.log(`Fetched reference: ${txHash}#${outputIndex}`);
       console.log(`Policy ID loaded: ${calculatedPolicyId}`);
       setReferenceUtxo({ txHash, outputIndex });
       setIsReferenceScriptSet(true);
-      setLastReloadTime(new Date()); // Set initial load time as last reload time
+      setLastReloadTime(new Date());
     } catch (err) {
       console.error("Error fetching or processing reference UTXO:", err);
       setReferenceError(`Failed to load script: ${err instanceof Error ? err.message : String(err)}`);
       setPolicyId(null);
+      setUserEquityHoldingsByIndex({});
     } finally {
       setIsLoadingReference(false);
     }
@@ -231,56 +237,62 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
       setReloadDataError("Cannot reload data: Lucid instance or Policy ID is not available.");
       return;
     }
-
     setIsReloadingData(true);
     setReloadDataError(null);
-
     try {
       const walletUtxos: LucidUTxO[] = await lucidInstance.wallet().getUtxos();
-      const holdings: AssetHoldings = walletUtxos
-        .map((utxo: LucidUTxO) => {
-          return Object.fromEntries(
-            Object.entries(utxo.assets).filter(([assetUnit, _quantity]: [string, bigint]) => {
-               return assetUnit.startsWith(policyId) 
-             }
-            )
-          ) as AssetHoldings;
-        })
-        .reduce((acc: AssetHoldings, currentHoldings: AssetHoldings) => {
-          for (const unit in currentHoldings) {
-            acc[unit] = (acc[unit] || 0n) + currentHoldings[unit];
+      const newHoldingsByIndex: AssetHoldingsByIndex = {};
+
+      for (const utxo of walletUtxos) {
+        for (const assetUnit in utxo.assets) {
+          if (assetUnit.startsWith(policyId)) {
+            const amount = utxo.assets[assetUnit];
+            const friendlyName = typeof lucidInstance.utils?.assetsToFriendlyName === 'function'
+              ? lucidInstance.utils.assetsToFriendlyName({ [assetUnit]: amount })
+              : assetUnit;
+            const tokenIndex = getIndexFromFriendlyName(friendlyName);
+
+            if (tokenIndex !== null) {
+              newHoldingsByIndex[tokenIndex] = (newHoldingsByIndex[tokenIndex] || 0n) + amount;
+            }
           }
-          return acc;
-        }, {} as AssetHoldings);
-      
-      setUserEquityHoldings(holdings);
-      console.log('User Equity Holdings reloaded:', holdings);
+        }
+      }
+      console.log('newHoldingsByIndex', newHoldingsByIndex);
+      setUserEquityHoldingsByIndex(newHoldingsByIndex);
+      console.log('User Equity Holdings By Index (Reloaded):', newHoldingsByIndex);
       setLastReloadTime(new Date());
     } catch (err) {
       console.error("Error reloading user data:", err);
       setReloadDataError(`Failed to reload data: ${err instanceof Error ? err.message : String(err)}`);
-      // Optionally, revert userEquityHoldings or handle partial updates if necessary
     } finally {
       setIsReloadingData(false);
     }
   };
 
-  const initiateWithdrawalProcess = (targetPoolConfigIndex: string) => {
+  const initiateWithdrawalProcess = (targetPoolConfigIndex: string, token: QualifyingTokenInfo) => {
     const targetPool = displayablePools.find(p => String(p.index) === targetPoolConfigIndex);
-    if (!targetPool || targetPool.userTokenAmount === null || targetPool.userTokenAmount === 0n || typeof targetPool.qualifyingUserTokenIndex !== 'number') {
-      console.error("Cannot initiate withdrawal: Target pool or qualifying token info is invalid.");
+    if (!targetPool || !token) { 
+      console.error("Cannot initiate withdrawal: Target pool or chosen token info is invalid.");
       return;
     }
     setSelectedPool(targetPoolConfigIndex);
-    setWithdrawAmount('');
+    setChosenTokenForWithdrawal(token);
+    setWithdrawAmount(token.amount.toString());
+    setShowTokenSelectorModal(false);
+    setPoolForTokenSelection(null);
   };
 
-  const mapPoolToWithdrawalParams = (pool: DisplayableRewardPool): WithdrawalPoolParams => ({
+  const openTokenSelector = (pool: DisplayableRewardPool) => {
+    setPoolForTokenSelection(pool);
+    setShowTokenSelectorModal(true);
+  };
+
+  const mapPoolToWithdrawalParams = (pool: DisplayableRewardPool, selectedToken: QualifyingTokenInfo): WithdrawalPoolParams => ({
     name: pool.name,
     index: pool.index,
-    userTokenUnit: pool.userTokenUnit,
-    qualifyingUserTokenIndex: pool.qualifyingUserTokenIndex === undefined ? null : pool.qualifyingUserTokenIndex,
-    userTokenAmount: pool.userTokenAmount,
+    userTokenUnit: selectedToken.unit,
+    userTokenAmount: selectedToken.amount,
     poolScriptReference: pool.poolScriptReference,
   });
 
@@ -298,61 +310,70 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
     if (selectedPool === null || !lucidInstance) {
         setReferenceError("Lucid instance not available or no pool selected.");
         setSelectedPool(null);
+        setChosenTokenForWithdrawal(null);
         return;
     }
     if (!referenceUtxo) {
         setWithdrawalError("Equity token reference script is not set. Please set it first.");
         setSelectedPool(null);
+        setChosenTokenForWithdrawal(null);
         return;
     }
+    if (!chosenTokenForWithdrawal) {
+        setWithdrawalError("No specific equity token was selected for withdrawal.");
+        setSelectedPool(null);
+        setChosenTokenForWithdrawal(null);
+        return;
+    }
+    if (!policyId) {
+        setWithdrawalError("Policy ID is not available. Cannot proceed.");
+        setSelectedPool(null);
+        setChosenTokenForWithdrawal(null);
+        return;
+    }
+
     const targetPool = displayablePools.find(p => String(p.index) === selectedPool);
-    if (!targetPool || targetPool.userTokenAmount === null || typeof targetPool.qualifyingUserTokenIndex !== 'number') {
-      console.error("Error in confirm: Target pool or qualifying token info is invalid.");
+    if (!targetPool) {
+      console.error("Error in confirm: Target pool not found (this should not happen).");
+      setWithdrawalError("Target pool not found.");
       setSelectedPool(null); 
+      setChosenTokenForWithdrawal(null);
       return;
     }
 
-    const userTokenCurrentIdx = targetPool.qualifyingUserTokenIndex;
-    const intermediatePoolsToProcess = displayablePools.filter(p => 
-      p.index >= userTokenCurrentIdx && 
-      p.index < targetPool.index && 
-      p.status === 'active' &&
-      p.userTokenUnit === targetPool.userTokenUnit &&
-      p.userTokenAmount !== null && p.userTokenAmount > 0n
-    ).sort((a, b) => a.index - b.index);
+    const userTokenCurrentIdx = chosenTokenForWithdrawal.tokenIndex;
+
+    const intermediatePoolsToProcess = displayablePools.filter(p => {
+      if (p.index >= userTokenCurrentIdx && p.index < targetPool.index && p.status === 'active') {
+        const chosenTokenQualifiesForIntermediate = p.qualifyingUserTokens.some(qToken => qToken.unit === chosenTokenForWithdrawal.unit);
+        return chosenTokenQualifiesForIntermediate;
+      }
+      return false;
+    }).sort((a, b) => a.index - b.index);
 
     const currentWithdrawAmount = withdrawAmount;
     setSelectedPool(null); 
 
-    if (intermediatePoolsToProcess.length > 0) {
-      setWithdrawCascadeDetails({ 
-        targetPool: targetPool,
-        intermediatePools: intermediatePoolsToProcess, 
-        amountForTargetPool: currentWithdrawAmount 
-      });
-      setShowWithdrawCascadeModal(true);
-    } else {
-      setIsProcessingWithdrawal(true);
-      setWithdrawalTxHash(null);
-      setWithdrawalError(null);
-      try {
-        const txResult = await processWithdrawal({
-            lucid: lucidInstance,
-            targetPool: mapPoolToWithdrawalParams(targetPool),
-            intermediatePools: [],
-            amount: currentWithdrawAmount,
-            equityNFTScriptORef: referenceUtxo
-        } as ProcessWithdrawalArgs);
-        setWithdrawalTxHash(txResult);
-        if (txResult) {
-          handleReloadData();
-        }
-      } catch (error) {
-        setWithdrawalError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setIsProcessingWithdrawal(false);
-        setWithdrawAmount(''); 
+    setIsProcessingWithdrawal(true);
+    setWithdrawalTxHash(null);
+    setWithdrawalError(null);
+    try {
+      const txResult = await processWithdrawal({
+          lucid: lucidInstance,
+          targetPool: mapPoolToWithdrawalParams(targetPool, chosenTokenForWithdrawal),
+          intermediatePools: intermediatePoolsToProcess.map(p => mapPoolToWithdrawalParams(p, chosenTokenForWithdrawal)),
+          amount: currentWithdrawAmount,
+          equityNFTScriptORef: referenceUtxo
+      } as ProcessWithdrawalArgs);
+      setWithdrawalTxHash(txResult);
+      if (txResult) {
+        handleReloadData();
       }
+    } catch (error) {
+      setWithdrawalError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsProcessingWithdrawal(false);
+      setWithdrawAmount(''); 
     }
   };
 
@@ -362,16 +383,22 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
         setWithdrawalError("Equity token reference script is not set. Please set it first.");
         setShowWithdrawCascadeModal(false);
         setWithdrawCascadeDetails(null);
+        setChosenTokenForWithdrawal(null);
         return;
       }
+      if (!chosenTokenForWithdrawal) {
+          setWithdrawalError("No specific equity token was selected for withdrawal. Please close modal and retry.");
+          return;
+      }
+
       setIsProcessingWithdrawal(true);
       setWithdrawalTxHash(null);
       setWithdrawalError(null);
       try {
         const txResult = await processWithdrawal({
             lucid: lucidInstance,
-            targetPool: mapPoolToWithdrawalParams(withdrawCascadeDetails.targetPool),
-            intermediatePools: withdrawCascadeDetails.intermediatePools.map(mapPoolToWithdrawalParams),
+            targetPool: mapPoolToWithdrawalParams(withdrawCascadeDetails.targetPool, chosenTokenForWithdrawal),
+            intermediatePools: withdrawCascadeDetails.intermediatePools.map(p => mapPoolToWithdrawalParams(p, chosenTokenForWithdrawal)),
             amount: withdrawCascadeDetails.amountForTargetPool,
             equityNFTScriptORef: referenceUtxo
         } as ProcessWithdrawalArgs);
@@ -394,6 +421,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
     setShowWithdrawCascadeModal(false);
     setWithdrawCascadeDetails(null);
     setWithdrawAmount('');
+    setChosenTokenForWithdrawal(null);
   };
 
   if (!isReferenceScriptSet) {
@@ -404,8 +432,8 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
           animate={{ opacity: 1, y: 0 }}
           className="bg-white/80 backdrop-blur-md shadow-soft rounded-xl p-6 sm:p-8 w-full max-w-lg text-center"
         >
-          <h2 className="text-2xl font-bold mb-6 text-gray-800">Set Equity Token Reference</h2>
-          <p className="text-gray-600 mb-6 text-sm">
+          <h2 className="text-2xl font-bold mb-6 text-black">Set Equity Token Reference</h2>
+          <p className="text-black mb-6 text-sm">
             Please provide the reference UTXO (txHash#outputIndex) that holds the minting policy script for the equity tokens.
           </p>
           <form onSubmit={handleSetReferenceScript} className="space-y-4">
@@ -459,14 +487,14 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
   return (
     <div className="space-y-8">
       <div className="bg-white/80 backdrop-blur-md shadow-soft rounded-xl p-4 mb-6 text-sm">
-        <p className="text-gray-700">
+        <p className="text-black">
           Equity Token Script Reference:
           <span className="font-mono bg-gray-100 p-1 rounded text-primary-600">
             {referenceUtxo?.txHash}#{referenceUtxo?.outputIndex}
           </span>
         </p>
         {policyId && (
-          <p className="text-gray-500 text-xs mt-1">
+          <p className="text-black text-xs mt-1">
             Policy ID: <span className="font-mono bg-gray-100 p-1 rounded">{policyId}</span>
           </p>
         )}
@@ -494,7 +522,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
               <span>{isReloadingData ? 'Reloading...' : 'Reload Data'}</span>
             </motion.button>
             {lastReloadTime && !isReloadingData && (
-              <p className="text-xs text-gray-500">Last updated: {lastReloadTime.toLocaleTimeString()}</p>
+              <p className="text-xs text-black">Last updated: {lastReloadTime.toLocaleTimeString()}</p>
             )}
         </div>
         {reloadDataError && (
@@ -507,19 +535,26 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
             </motion.p>
         )}
 
-        {Object.keys(userEquityHoldings).length > 0 && lucidInstance && (
+        {Object.keys(userEquityHoldingsByIndex).length > 0 && lucidInstance && policyId && (
           <div className="mt-4">
-            <h3 className="text-md font-semibold text-gray-800 mb-2">Your Equity Token Holdings (All under this Policy ID):</h3>
+            <h3 className="text-md font-semibold text-black mb-2">Your Equity Token Holdings (All under this Policy ID):</h3>
             <ul className="list-disc pl-5 space-y-1">
-              {Object.entries(userEquityHoldings).map(([unit, amount]) => (
-                <li key={unit} className="text-xs text-gray-600">
-                  <span className="font-mono bg-gray-100 p-0.5 rounded">
-                    {(typeof lucidInstance.utils?.assetsToFriendlyName === 'function' ? 
-                      lucidInstance.utils.assetsToFriendlyName({[unit]: amount}) : unit)}
-                  </span>: 
-                  <span className="font-semibold"> {amount.toString()}</span>
-                </li>
-              ))}
+              {Object.entries(userEquityHoldingsByIndex).map(([indexStr, amount]) => {
+                const tokenIndex = parseInt(indexStr, 10);
+                // Construct unit using policyId and tokenIndex (hex padded to 2 chars)
+                const assetNameHex = tokenIndex.toString(16).padStart(2, '0');
+                const unit = policyId + assetNameHex;
+
+                return (
+                  <li key={tokenIndex} className="text-xs text-black">
+                    <span className="font-mono bg-gray-100 p-0.5 rounded">
+                      {(typeof lucidInstance.utils?.assetsToFriendlyName === 'function' ? 
+                        lucidInstance.utils.assetsToFriendlyName({[unit]: amount}) : unit)} 
+                    </span>: 
+                    <span className="font-semibold"> {amount.toString()}</span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
@@ -530,17 +565,17 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
         animate={{ opacity: 1, y: 0 }}
         className="bg-white/80 backdrop-blur-md shadow-soft rounded-xl p-6"
       >
-        <h2 className="text-2xl font-bold mb-6">
+        <h2 className="text-2xl font-bold mb-6 text-black">
           Available Reward Pools for current Equity Token
         </h2>
-        {isLoadingConfigs && <p className="text-gray-500">Loading reward pool configurations...</p>}
+        {isLoadingConfigs && <p className="text-black">Loading reward pool configurations...</p>}
         {configError && <p className="text-red-500">Error loading configurations: {configError}</p>}
         
         {!isLoadingConfigs && !configError && policyId && !rewardConfigsMap?.[policyId] && (
-            <p className="text-gray-600 text-center py-4">No reward pool configurations found for the loaded equity token policy ID ({policyId}).</p>
+            <p className="text-black text-center py-4">No reward pool configurations found for the loaded equity token policy ID ({policyId}).</p>
         )}
         {!isLoadingConfigs && !configError && policyId && rewardConfigsMap?.[policyId] && displayablePools.length === 0 && (
-            <p className="text-gray-600 text-center py-4">No reward pools available for your tokens under policy ID {policyId}, or no matching equity tokens found for configured pools.</p>
+            <p className="text-black text-center py-4">No reward pools available for your tokens under policy ID {policyId}, or no matching equity tokens found for configured pools.</p>
         )}
 
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -556,7 +591,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
                 <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-primary-500 to-secondary-500"></div>
                 <div className="p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-gray-900">{pool.name} (Index: {pool.index})</h3>
+                    <h3 className="text-lg font-semibold text-black">{pool.name} (Index: {pool.index})</h3>
                     <span className={`px-3 py-1 text-xs font-medium rounded-full ${pool.status === 'active' 
                         ? 'bg-green-100 text-green-800' 
                         : pool.status === 'pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'
@@ -564,43 +599,29 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
                       {pool.status}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-600 mb-3">{pool.description}</p>
+                  <p className="text-sm text-black mb-3">{pool.description}</p>
                   
-                  <div className="grid grid-cols-2 gap-4 mb-6">
-                    <div className="bg-gray-50 rounded-lg p-3">
-                      <p className="text-sm text-gray-500 mb-1">Your Qualifying Token</p>
-                      <p className="text-xl font-bold text-primary-600">
-                        {pool.userTokenAmount !== null ? pool.userTokenAmount.toString() : 'N/A'}
-                      </p>
-                      {pool.userTokenUnit && lucidInstance && (
-                        <p className="text-xs text-gray-500 truncate">
-                          (Name: {typeof lucidInstance.utils?.assetsToFriendlyName === 'function' ? lucidInstance.utils.assetsToFriendlyName({[pool.userTokenUnit]: pool.userTokenAmount || 0n}) : pool.userTokenUnit})
-                          {pool.qualifyingUserTokenIndex !== null && ` (Index: ${pool.qualifyingUserTokenIndex})`}
-                        </p>
-                      )}
-                      {pool.userTokenAmount === null && (
-                          <p className="text-xs text-gray-500">No token you hold qualifies for this pool.</p>
-                      )}
-                    </div>
-                    <div className="bg-gray-50 rounded-lg p-3">
-                      <p className="text-sm text-gray-500 mb-1">Total in Pool</p>
-                      <p className="text-xl font-bold text-gray-900">{pool.totalAmountInPool}</p>
-                    </div>
+                  <div className="mb-4">
+                    <p className="text-sm text-black mb-1">Your Qualifying Equity (Total):</p>
+                    <p className="text-xl font-bold text-primary-600">
+                      {pool.qualifyingUserTokens.reduce((sum, token) => sum + token.amount, 0n).toString() || '0'}
+                    </p>
+                    {pool.qualifyingUserTokens.length > 0 ? (
+                      <motion.button
+                        onClick={() => openTokenSelector(pool)}
+                        className="mt-2 w-full py-2 px-3 text-sm rounded-md font-medium bg-blue-500 text-white hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1 transition-all duration-200"
+                      >
+                        Select Token to Withdraw With ({pool.qualifyingUserTokens.length} eligible)
+                      </motion.button>
+                    ) : (
+                      <p className="text-xs text-black italic mt-2">No specific equity token you hold qualifies for this pool's current index.</p>
+                    )}
                   </div>
 
-                  <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={() => initiateWithdrawalProcess(String(pool.index))}
-                    disabled={pool.status !== 'active' || pool.userTokenAmount === null || pool.userTokenAmount === 0n}
-                    className={`w-full py-3 px-4 rounded-lg font-medium focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-all duration-200 ${
-                        (pool.status !== 'active' || pool.userTokenAmount === null || pool.userTokenAmount === 0n) 
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                        : 'bg-gradient-to-r from-primary-600 to-secondary-600 text-black hover:from-primary-700 hover:to-secondary-700'
-                    }`}
-                  >
-                    Withdraw from Pool (Index {pool.index})
-                  </motion.button>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <p className="text-sm text-black mb-1">Total Rewards in Pool</p>
+                    <p className="text-xl font-bold text-black">{pool.totalAmountInPool}</p>
+                  </div>
                 </div>
               </motion.div>
             ))}
@@ -649,14 +670,14 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
             const currentPoolForModal = displayablePools.find(p => String(p.index) === selectedPool);
             if (!currentPoolForModal) return null;
             return (
-              <motion.div /* Modal container */ onClick={() => {setSelectedPool(null); setWithdrawAmount('');}} className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
+              <motion.div /* Modal container */ onClick={() => {setSelectedPool(null); setWithdrawAmount(''); setChosenTokenForWithdrawal(null);}} className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
                 <motion.div /* Modal content */ onClick={(e) => e.stopPropagation()} className="bg-white rounded-xl shadow-2xl p-6 sm:p-8 w-full max-w-md">
-                  <h2 className="text-2xl font-bold mb-6">Withdraw from {currentPoolForModal.name}</h2>
-                  <p className="text-sm text-gray-600 mb-4">
-                    Please enter the amount you wish to withdraw from this pool. If other prerequisite pools need to be processed, you will be asked to confirm.
+                  <h2 className="text-2xl font-bold mb-6 text-black">Withdraw from {currentPoolForModal.name} with Token Index {chosenTokenForWithdrawal?.tokenIndex}</h2>
+                  <p className="text-sm text-black mb-4">
+                    You are withdrawing with token: <span className="font-semibold">{chosenTokenForWithdrawal?.unit ? (lucidInstance?.utils?.assetsToFriendlyName?.({[chosenTokenForWithdrawal.unit]: chosenTokenForWithdrawal.amount}) || chosenTokenForWithdrawal.unit) : "N/A"}</span> (Amount: {chosenTokenForWithdrawal?.amount.toString()}).
                   </p>
                   <div>
-                     <label htmlFor="withdraw-amount" className="block text-sm font-medium text-gray-700">Amount to Withdraw</label>
+                     <label htmlFor="withdraw-amount" className="block text-sm font-medium text-black">Amount to Withdraw</label>
                      <input
                        type="number"
                        id="withdraw-amount"
@@ -678,7 +699,7 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
                       <span>{isProcessingWithdrawal && selectedPool ? 'Processing...' : 'Continue'}</span>
                     </motion.button>
                     <motion.button 
-                      onClick={() => {setSelectedPool(null); setWithdrawAmount('');}} 
+                      onClick={() => {setSelectedPool(null); setWithdrawAmount(''); setChosenTokenForWithdrawal(null);}} 
                       className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                     >
                       Cancel
@@ -695,28 +716,31 @@ export default function UserDashboard({ lucidInstance, appNetwork }: UserDashboa
         {showWithdrawCascadeModal && withdrawCascadeDetails && (
           <motion.div /* Modal container */ onClick={handleCancelCascadeWithdraw} className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
             <motion.div /* Modal content */ onClick={(e) => e.stopPropagation()} className="bg-white rounded-xl shadow-2xl p-6 sm:p-8 w-full max-w-lg">
-              <h2 className="text-xl font-bold mb-4 text-gray-800">Confirm Cascading Withdrawal</h2>
-              <p className="text-sm text-gray-600 mb-2">
+              <h2 className="text-xl font-bold mb-4 text-black">Confirm Cascading Withdrawal</h2>
+              <p className="text-sm text-black mb-2">
 You are targeting withdrawal from <span className="font-semibold">{withdrawCascadeDetails.targetPool.name} (Index: {withdrawCascadeDetails.targetPool.index})</span>.
               {withdrawCascadeDetails.amountForTargetPool && parseFloat(withdrawCascadeDetails.amountForTargetPool) > 0 && (
                 <span> You specified an amount of <span className="font-semibold">{withdrawCascadeDetails.amountForTargetPool}</span> for this target pool.</span>
               )}
               </p>
               {withdrawCascadeDetails.intermediatePools.length > 0 && (
-                <p className="text-sm text-gray-600 mb-4">
+                <p className="text-sm text-black mb-4">
                   This action will also process withdrawals from the following prerequisite pool(s) using your token 
-                  <span className="font-mono text-xs bg-gray-100 p-0.5 rounded">{typeof lucidInstance?.utils?.assetsToFriendlyName === 'function' && withdrawCascadeDetails.targetPool.userTokenUnit ? 
-                   lucidInstance.utils.assetsToFriendlyName({[withdrawCascadeDetails.targetPool.userTokenUnit]: withdrawCascadeDetails.targetPool.userTokenAmount || 0n}) : 
-                   withdrawCascadeDetails.targetPool.userTokenUnit}
-                  </span> (currently at Index {withdrawCascadeDetails.targetPool.qualifyingUserTokenIndex}):
+                  <span className="font-mono text-xs bg-gray-100 p-0.5 rounded">{typeof lucidInstance?.utils?.assetsToFriendlyName === 'function' && withdrawCascadeDetails.targetPool.qualifyingUserTokens.length > 0 ? 
+                   lucidInstance.utils.assetsToFriendlyName({[withdrawCascadeDetails.targetPool.qualifyingUserTokens[0].unit]: withdrawCascadeDetails.targetPool.qualifyingUserTokens[0].amount || 0n}) : 
+                   withdrawCascadeDetails.targetPool.qualifyingUserTokens[0].unit}
+                  </span> (currently at Index {
+                    // Display the index derived from chosenTokenForWithdrawal for consistency
+                    chosenTokenForWithdrawal?.tokenIndex ?? 'N/A'
+                  }):
                 </p>
               )}
               <ul className="list-disc pl-5 space-y-1 mb-6 max-h-40 overflow-y-auto">
                 {withdrawCascadeDetails.intermediatePools.map(pool => (
-                  <li key={pool.index} className="text-sm text-gray-500">{pool.name} (Index: {pool.index})</li>
+                  <li key={pool.index} className="text-sm text-black">{pool.name} (Index: {pool.index})</li>
                 ))}
               </ul>
-              <p className="text-sm text-gray-600 mb-6">
+              <p className="text-sm text-black mb-6">
                 Your token's index will be updated to {withdrawCascadeDetails.targetPool.index + 1} after this operation.
               </p>
               <div className="flex justify-end space-x-3">
@@ -732,6 +756,55 @@ You are targeting withdrawal from <span className="font-semibold">{withdrawCasca
                   <span>{isProcessingWithdrawal ? 'Processing...' : 'Confirm & Withdraw All'}</span>
                 </motion.button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Token Selector Modal */}
+      <AnimatePresence>
+        {showTokenSelectorModal && poolForTokenSelection && (
+          <motion.div 
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[120]"
+            onClick={() => { setShowTokenSelectorModal(false); setPoolForTokenSelection(null); }}
+          >
+            <motion.div 
+              className="bg-white rounded-xl shadow-2xl p-6 sm:p-8 w-full max-w-md"
+              onClick={(e) => e.stopPropagation()} // Prevent click through
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+            >
+              <h2 className="text-xl font-bold mb-4 text-black">Select Token for {poolForTokenSelection.name}</h2>
+              {poolForTokenSelection.qualifyingUserTokens.length > 0 ? (
+                <ul className="list-none pl-0 space-y-3 max-h-60 overflow-y-auto pr-2">
+                  {poolForTokenSelection.qualifyingUserTokens.map((token) => (
+                    <li key={token.unit} className="p-3 bg-gray-50 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors">
+                      <div className="font-semibold text-black mb-1">Amount: {token.amount.toString()}</div>
+                      <div className="text-black truncate mb-1 text-sm">
+                        Name: {lucidInstance?.utils?.assetsToFriendlyName?.({[token.unit]: token.amount}) || token.unit}
+                      </div>
+                      <div className="text-black mb-2 text-sm">(Token Index: {token.tokenIndex})</div>
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => initiateWithdrawalProcess(String(poolForTokenSelection.index), token)}
+                        className="w-full py-2 px-3 text-sm rounded-md font-medium bg-primary-500 text-white hover:bg-primary-600 focus:outline-none focus:ring-2 focus:ring-primary-400 focus:ring-offset-1 transition-all duration-200"
+                      >
+                        Withdraw with this Token (Index {token.tokenIndex})
+                      </motion.button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-black text-center">No tokens available for selection.</p>
+              )}
+              <button 
+                onClick={() => { setShowTokenSelectorModal(false); setPoolForTokenSelection(null); }}
+                className="mt-6 w-full py-2 px-4 text-sm font-medium text-black bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
             </motion.div>
           </motion.div>
         )}
